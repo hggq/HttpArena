@@ -209,12 +209,21 @@ namespace
     }
 
     // One query path for both DB routes: gate -> driver -> explicit failure.
-    // pg_async_query_vec_impl() catches driver exceptions into error_msg and
+    // pg_async_exec_query_vec_impl() catches driver exceptions into error_msg and
     // returns 0 rows, so checking rows.empty() would mistake a legitimate
     // empty /async-db result for an error; iserror / error_msg are the signal.
+    //
+    // async_exec_query() is the extended-protocol entry: the driver keys a
+    // named prepared statement per connection on the SQL text and, on the warm
+    // path, sends only Bind + Execute + Sync (no Parse/Describe). Two effects
+    // matter here: PG stops re-parsing and re-planning every request, and the
+    // SQL text is constant for all raw templates once the values are bound, so
+    // each pooled connection keeps exactly one cached statement instead of one
+    // per literal combination.
     template <typename Row>
     asio::awaitable<bool> fetch_rows(const std::shared_ptr<http::httppeer> &peer,
                                      const std::string &sql,
+                                     const std::vector<http::obj_val> &params,
                                      std::vector<Row> &rows)
     {
         db_gate::ticket ticket;
@@ -227,7 +236,7 @@ namespace
         try
         {
             auto link = std::make_unique<orm::db_conn>("pg");
-            co_await link->async_query(sql, rows);
+            co_await link->async_exec_query(sql, params, rows);
             if (link->iserror || !link->error_msg.empty())
             {
                 rows.clear();
@@ -427,16 +436,21 @@ asio::awaitable<std::string> arena_async_db(std::shared_ptr<httppeer> peer)
     if (limit < 1) limit = 1;
     if (limit > 50) limit = 50;
 
-    std::string sql = "SELECT id,name,category,price,quantity,active,tags,rating_score,rating_count FROM items WHERE price BETWEEN ";
-    sql += std::to_string(min_price);
-    sql += " AND ";
-    sql += std::to_string(max_price);
-    sql += " LIMIT ";
-    sql += std::to_string(limit);
+    // Constant text on purpose: it is the driver's prepared-statement cache key.
+    // The three `?` become $1..$3 and the values travel as bound text, which PG
+    // coerces to integer/bigint from the column and LIMIT.
+    static const std::string sql =
+        "SELECT id,name,category,price,quantity,active,tags,rating_score,rating_count "
+        "FROM items WHERE price BETWEEN ? AND ? LIMIT ?";
+
+    std::vector<http::obj_val> params;
+    params.emplace_back(min_price);
+    params.emplace_back(max_price);
+    params.emplace_back(limit);
 
     std::vector<item_row> rows;
     rows.reserve(static_cast<std::size_t>(limit));
-    if (!co_await fetch_rows(peer, sql, rows))
+    if (!co_await fetch_rows(peer, sql, params, rows))
     {
         co_return "";
     }
@@ -456,7 +470,8 @@ asio::awaitable<std::string> arena_fortunes(std::shared_ptr<httppeer> peer)
     // contract; reserve() only sets capacity either way.
     std::vector<fortune_row> rows;
     rows.reserve(201);
-    if (!co_await fetch_rows(peer, "SELECT id,message FROM fortune", rows))
+    const std::vector<http::obj_val> no_params;
+    if (!co_await fetch_rows(peer, "SELECT id,message FROM fortune", no_params, rows))
     {
         co_return "";
     }
