@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Pinned so mini_project.sh, the controller generator and the CMake entry point
 # stay in sync with the scaffold this entry was written against.
-ARG PAOZHU_REF=b7022bf63f0d40061e785bb9a2996545fd945054
+ARG PAOZHU_REF=637406b4d003c8ae53a7038ff6300d6e8782f21f
 WORKDIR /paozhu
 # Prefer a source archive shipped in the build context (offline / slow-GitHub
 # environments); otherwise fetch the pinned revision from codeload. The direct
@@ -54,6 +54,11 @@ RUN bash mini_project.sh && \
 
 COPY src/controller/ /paozhu/controller/
 COPY src/conf/ /paozhu/conf/
+
+# WebSocket /ws echo comes from the pinned PAOZHU_REF source: it ships
+# websockets/arena_ws_echo.hpp and the is_binary flag in vendor/httpserver.
+# src/mini_project.sh registers key "ws" and keeps that handler while emptying
+# the demo directories, so no framework files are copied over the source tree.
 
 # A macOS-created build context can carry AppleDouble ._* sidecars. CMake globs
 # every .cpp under controller/src, so ._arena.cpp would be compiled as C++.

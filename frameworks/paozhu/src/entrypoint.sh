@@ -2,7 +2,8 @@
 # paozhu has one plaintext and one TLS port per process. HttpArena needs four
 # listeners, so run two instances with two conf files: the main one serves
 # :8080 (HTTP/1.1) and :8443 (ALPN h2), the second serves :8081 with ALPN
-# pinned to http/1.1 for json-tls plus :8082 cleartext h2c for json-h2c.
+# pinned to http/1.1 for json-tls plus :8082 cleartext h2c for
+# baseline-h2c and json-h2c.
 # See README.md.
 set -euo pipefail
 

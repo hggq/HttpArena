@@ -30,12 +30,14 @@ paozhu opens exactly one plaintext and one TLS port per process, while HttpArena
 
 | Port | Protocols | Instance | Profiles |
 |------|-----------|----------|----------|
-| 8080 | HTTP/1.1 | `conf/main/server.conf` | baseline, pipelined, limited-conn |
+| 8080 | HTTP/1.1 + WebSocket | `conf/main/server.conf` | baseline, pipelined, limited-conn, json-comp, echo-ws* |
 | 8081 | HTTP/1.1 + TLS (ALPN `http/1.1` only) | `conf/h1/server.conf` | json-tls |
-| 8082 | h2c (prior-knowledge, cleartext) | `conf/h1/server.conf` | json-h2c |
+| 8082 | h2c (prior-knowledge, cleartext) | `conf/h1/server.conf` | baseline-h2c, json-h2c |
 | 8443 | h2 + TLS (ALPN `h2`) | `conf/main/server.conf` | baseline-h2, static-h2 |
 
 The second instance keeps `http2_enable = 0`, so its ALPN callback never selects `h2` — the json-tls profile requires HTTP/1.1. That switch only governs TLS negotiation: cleartext h2c is detected from the `PRI * HTTP/2.0` connection preface by `checkhttp2()` and works with `http2_enable = 0`, which is why the same instance can serve both :8081 and :8082.
+
+**WebSocket:** `/ws` is answered by `arena_ws_echo` through paozhu's `WEBSOCKET_REG` (key `"ws"`, i.e. `peer->pathinfos[0]`). The handler, the registration in `common/websockets_method_reg.hpp` and the `is_binary` flag in `vendor/httpserver` all come from the pinned `PAOZHU_REF` source. `src/mini_project.sh` — the pinned copy carrying the `|| true` fix — writes the registration and keeps `websockets/arena_ws_echo.hpp` while emptying the demo directories; no framework files are copied over the source tree. Binary frames are echoed with opcode `0x2` (`validate-ws.py` checks both text and binary).
 
 **Why separate conf directories:** `httpserver::run(argv[1])` calls `serverconfig::init_path()` first, which picks `<cwd>/conf/server.conf` when present and only falls back to `argv[1]` when that file is missing. Two conf files in one directory would make both processes load the first one and bind the same ports (SO_REUSEPORT hides the mistake). The image deliberately has no `/app/conf/server.conf`. `serverconfig` also resolves TLS file names relative to each conf file's own directory, so `entrypoint.sh` stages `/certs/server.crt` and `/certs/server.key` into both `conf/main/` and `conf/h1/`.
 
