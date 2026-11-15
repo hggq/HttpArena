@@ -19,24 +19,59 @@
 namespace
 {
     // paozhu's Postgres driver hands every column back as text. Supplying a
-    // `set_val` row type is enough for orm::db_conn::async_query() — no
+    // `set_val` row type is enough for orm::db_conn::async_exec_query() — no
     // generated ORM model is needed (mini_project.sh empties orm/ + models/).
+    // The driver hands column names back from a per-result cache (one
+    // std::string per column, reused for every row), so the name is already a
+    // cheap key: dispatch on its first byte instead of running nine string
+    // compares per value. Numeric columns land straight in an integer through
+    // from_chars, so only the three text columns build a std::string at all
+    // (an assign, not a temporary copy).
     struct item_row
     {
-        std::string id, name, category, price, quantity, active, tags, rating_score, rating_count;
+        std::string name, category, tags;
+        long long id = 0, price = 0, quantity = 0, rating_score = 0, rating_count = 0;
+        bool active = false;
 
         void set_val(const std::string &col, const unsigned char *data, std::size_t len, unsigned char)
         {
-            std::string value(reinterpret_cast<const char *>(data), len);
-            if (col == "id")                 { id = std::move(value); }
-            else if (col == "name")         { name = std::move(value); }
-            else if (col == "category")     { category = std::move(value); }
-            else if (col == "price")        { price = std::move(value); }
-            else if (col == "quantity")     { quantity = std::move(value); }
-            else if (col == "active")       { active = std::move(value); }
-            else if (col == "tags")         { tags = std::move(value); }
-            else if (col == "rating_score") { rating_score = std::move(value); }
-            else if (col == "rating_count") { rating_count = std::move(value); }
+            const char *p = reinterpret_cast<const char *>(data);
+            switch (col[0])
+            {
+                case 'i':  // id
+                    std::from_chars(p, p + len, id);
+                    break;
+                case 'n':  // name
+                    name.assign(p, len);
+                    break;
+                case 'c':  // category
+                    category.assign(p, len);
+                    break;
+                case 'p':  // price
+                    std::from_chars(p, p + len, price);
+                    break;
+                case 'q':  // quantity
+                    std::from_chars(p, p + len, quantity);
+                    break;
+                case 'a':  // active: PG text output is 't' / 'f'
+                    active = len != 0 && (p[0] == 't' || p[0] == 'T' || p[0] == '1');
+                    break;
+                case 't':  // tags
+                    tags.assign(p, len);
+                    break;
+                case 'r':  // rating_score / rating_count
+                    if (col[7] == 's')
+                    {
+                        std::from_chars(p, p + len, rating_score);
+                    }
+                    else
+                    {
+                        std::from_chars(p, p + len, rating_count);
+                    }
+                    break;
+                default:
+                    break;
+            }
         }
     };
 
@@ -47,16 +82,14 @@ namespace
 
         void set_val(const std::string &col, const unsigned char *data, std::size_t len, unsigned char)
         {
-            std::string value(reinterpret_cast<const char *>(data), len);
-            if (col == "id")
+            const char *p = reinterpret_cast<const char *>(data);
+            if (col[0] == 'i')  // id
             {
-                long long parsed = 0;
-                std::from_chars(value.data(), value.data() + value.size(), parsed);
-                id = parsed;
+                std::from_chars(p, p + len, id);
             }
-            else if (col == "message")
+            else  // message
             {
-                message = std::move(value);
+                message.assign(p, len);
             }
         }
     };
@@ -282,20 +315,38 @@ namespace
         return fallback;
     }
 
-    std::string integer_or_zero(const std::string &value)
+    // Append a decimal integer straight into the output buffer. std::to_string
+    // would allocate a temporary std::string per number, and render_items emits
+    // five numbers per row.
+    void append_int(std::string &out, long long value)
     {
-        return std::to_string(to_int(value));
-    }
-
-    bool is_true(const std::string &value)
-    {
-        return value == "t" || value == "T" || value == "true" ||
-               value == "TRUE" || value == "1";
+        char buf[24];
+        auto result = std::to_chars(buf, buf + sizeof(buf), value);
+        out.append(buf, static_cast<std::size_t>(result.ptr - buf));
     }
 
     void append_json_string(std::string &out, std::string_view value)
     {
         static const char *hex = "0123456789abcdef";
+        // Names, categories and tags are normally clean: one bulk append beats
+        // a byte-at-a-time copy. Only fall back to the escaping loop when the
+        // value actually contains something JSON must escape.
+        bool plain = true;
+        for (unsigned char ch : value)
+        {
+            if (ch < 0x20 || ch == '"' || ch == '\\')
+            {
+                plain = false;
+                break;
+            }
+        }
+        if (plain)
+        {
+            out.push_back('"');
+            out.append(value.data(), value.size());
+            out.push_back('"');
+            return;
+        }
         out.push_back('"');
         for (unsigned char ch : value)
         {
@@ -366,17 +417,17 @@ namespace
                 out.push_back(',');
             }
             out += "{\"id\":";
-            out += integer_or_zero(r.id);
+            append_int(out, r.id);
             out += ",\"name\":";
             append_json_string(out, r.name);
             out += ",\"category\":";
             append_json_string(out, r.category);
             out += ",\"price\":";
-            out += integer_or_zero(r.price);
+            append_int(out, r.price);
             out += ",\"quantity\":";
-            out += integer_or_zero(r.quantity);
+            append_int(out, r.quantity);
             out += ",\"active\":";
-            out += is_true(r.active) ? "true" : "false";
+            out += r.active ? "true" : "false";
             out += ",\"tags\":";
             // jsonb arrives as a JSON array in text form; keep it verbatim.
             if (r.tags.size() > 1 && r.tags.front() == '[' && r.tags.back() == ']')
@@ -388,13 +439,13 @@ namespace
                 out += "[]";
             }
             out += ",\"rating\":{\"score\":";
-            out += integer_or_zero(r.rating_score);
+            append_int(out, r.rating_score);
             out += ",\"count\":";
-            out += integer_or_zero(r.rating_count);
+            append_int(out, r.rating_count);
             out += "}}";
         }
         out += "],\"count\":";
-        out += std::to_string(rows.size());
+        append_int(out, static_cast<long long>(rows.size()));
         out.push_back('}');
         return out;
     }
@@ -413,7 +464,7 @@ namespace
         for (const fortune_row &r : rows)
         {
             out += "<tr><td>";
-            out += std::to_string(r.id);
+            append_int(out, r.id);
             out += "</td><td>";
             append_html_escaped(out, r.message);
             out += "</td></tr>";
